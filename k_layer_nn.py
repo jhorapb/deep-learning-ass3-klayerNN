@@ -12,8 +12,6 @@ dimension_d = 3072
 exp_derivative = 1e-6
 eta_min = 1e-5
 eta_max = 1e-1
-# n_s = 400 # 2 * math.floor(10000 // 100) # 800   # Step size
-# n_s = 2 * math.floor(45000 // 100)  # Step size
 n_s = 2 * math.floor(49000 // 100)  # Step size
 
 # Number of nodes of the hidden layer
@@ -150,21 +148,21 @@ def forward_pass(X, W_params, b_params):
     P = softmax(s)
     return X_i_list, S_i_list, P
 
-def compute_loss(X, Y, W_1, b_1, W_2, b_2, lambda_value):
+def compute_loss(X, Y, W_params, b_params, lambda_value):
     """
     Computes the cross-entropy loss of the NN.
     It uses the cross-entropy formulae for each input as well as a
     regularization term.
     """
-    X_i_list, S_i_list, P = forward_pass(X, W_1, b_1, W_2, b_2)
+    X_i_list, S_i_list, P = forward_pass(X, W_params, b_params)
 
     cross_entropy_loss = (-1 / X.shape[1]) * np.sum(
         [np.log(np.dot(Y[:, index].T, P[:, index])) for index in range(X.shape[1])]
     )
-
-    regularization_W1 = lambda_value * np.sum(np.square(W_1))
-    regularization_W2 = lambda_value * np.sum(np.square(W_2))
-    total_loss = cross_entropy_loss + regularization_W1 + regularization_W2
+    
+    regularization_Ws = lambda_value * np.sum([np.sum(np.square(W_i)) for W_i in W_params])
+    
+    total_loss = cross_entropy_loss + regularization_Ws
 
     return total_loss
     
@@ -187,7 +185,7 @@ def compute_accuracy(X, y, W_1, b_1, W_2, b_2):
     return np.mean(pred_class_labels == y) * 100
 
 
-def backward_pass(X, Y, H, P, X_i_list, S_i_list, W_params, b_params, lambda_value):
+def backward_pass(X, Y, P, X_i_list, S_i_list, W_params, b_params, lambda_value):
     """
     Computes the gradients for the weights and bias parameters.
     -each column of X corresponds to an image and it has size d×n.
@@ -209,10 +207,10 @@ def backward_pass(X, Y, H, P, X_i_list, S_i_list, W_params, b_params, lambda_val
     k_last = k_layers - 1
     n_batch = X.shape[1]
     # Initializing gradients for layer 1
-    grad_W = np.zeros(W_params.shape)
-    grad_b = np.zeros(b_params.shape)
-    print('GRAD W shape->', grad_W.shape)
-    print('GRAD bbb shape->', grad_b.shape)
+    grad_W = [0] * len(W_params)
+    grad_b = [0] * len(b_params)
+    print('GRAD W shape->', grad_W)
+    print('GRAD bbb shape->', grad_b)
     average_param = 1 / n_batch
 
     ##### Gradients from the output layer to the scores of the hidden layer #####
@@ -229,16 +227,20 @@ def backward_pass(X, Y, H, P, X_i_list, S_i_list, W_params, b_params, lambda_val
     
     ##### Gradients computation  #####
     # Back-propagating gradients from the last hidden layer to the previous one
-    G_batch = np.dot(W_params[-1].T, G_batch)    # Because s = W2 * H + b2 and ds/dh = W2
-    # Gbatch (scores 1, dz_0)
-    G_batch = G_batch * np.int8(H > 0)   # Because h = max(0, s1) and dh/ds1 = diag(Ind(s1 > 0))
+    G_batch = np.dot(W_params[-1].T, G_batch)
+    
+    # We use the X from the last ReLu activation.
+    G_batch = G_batch * np.int8(X_i_list[-1] > 0) # diag(Ind(X(k-1) > 0))
     
     # Computing gradient of J with respect to all the preceding layers
     for l in reversed(range(k_layers - 1)):
         y_l = 1
         b_l = 1
         # Compute gradient for the scale and offset parameters for layer l:
-        grad_gammal = average_param * np.dot(np.dot(G_batch, S_i_list[l]), np.ones((n_batch, 1)))
+        # print('shapes1', G_batch.shape)
+        # print('shapes2', S_i_list[l].shape)
+        # print('shapes3', np.ones((n_batch, 1)).shape)
+        grad_gammal = average_param * np.dot(np.dot(G_batch.T, S_i_list[l]), np.ones((n_batch, 1)))
         grad_beta = average_param * np.dot(G_batch, np.ones((n_batch, 1)))
         # Propagate the gradients through the scale and shift
         G_batch = G_batch * np.dot(y_l, np.ones((1, n_batch)))
@@ -251,7 +253,7 @@ def backward_pass(X, Y, H, P, X_i_list, S_i_list, W_params, b_params, lambda_val
         # Add regularization parameter
         grad_W[l] += 2 * lambda_value * W_params[l]
         # Gradients of J w.r.t. bl
-        grad_bl[l] = average_param * np.dot(G_batch, np.ones((n_batch, 1)))
+        grad_b[l] = average_param * np.dot(G_batch, np.ones((n_batch, 1)))
         # If l > 1 propagate G batch to the previous layer
         G_batch = np.dot(W_params[l].T, G_batch)    # Because s = W2 * H + b2 and ds/dh = W2
         # Gbatch (scores 1, dz_0)
@@ -264,42 +266,41 @@ def backward_pass(X, Y, H, P, X_i_list, S_i_list, W_params, b_params, lambda_val
 
 
 def ComputeGradsNumSlow(X, Y, P, W_params, b_params, lambda_value, h):
-    """ Converted from matlab code by Andree Hultgren """
 
-    grad_W = np.zeros(W_params.shape)
-    grad_b = np.zeros((no, 1))
-    grad_W2 = np.zeros(W_2.shape)
-    grad_b2 = np.zeros((no_2, 1))
-	
-    for b_layer in b_params:
-        no = W_params.shape[0]
-        d = X.shape[0]
-        grad_bl = np.zeros((no, 1))
-        for i in range(len(b_1)):
-            b_try = np.array(b_1)
-            b_try[i] -= h
+    grad_W_params = []
+    grad_b_params = []
+ 
+    for i, b_layer in enumerate(b_params):
+        grad_bl = np.zeros(b_layer.shape)
+        grad_b_params.append(grad_bl)
+        for j in range(len(b_layer)): # also possible with range(b_layer.shape[0])
+            b_try = np.array(b_params)
+            b_try[i][j] -= h
 
             c1 = compute_loss(X, Y, W_params, b_try, lambda_value)
 
-            b_try = np.array(b_1)
-            b_try[i] += h
+            b_try = np.array(b_params)
+            b_try[i][j] += h
             c2 = compute_loss(X, Y, W_params, b_try, lambda_value)
 
-            grad_b[i] = (c2-c1) / (2*h)
+            grad_b_params[i][j] = (c2-c1) / (2*h)
 
-    for i in range(W_1.shape[0]):
-        for j in range(W_1.shape[1]):
-            W_try = np.array(W_1)
-            W_try[i,j] -= h
-            c1 = compute_loss(X, Y, W_try, b_params, lambda_value)
+    for i, W_layer in enumerate(W_params):
+        grad_Wl = np.zeros(W_layer.shape)
+        grad_W_params.append(grad_Wl)
+        for j in range(W_layer.shape[0]):
+            for k in range(W_layer.shape[1]):
+                W_try = np.array(W_params)
+                W_try[i][j,k] -= h
+                c1 = compute_loss(X, Y, W_try, b_params, lambda_value)
 
-            W_try = np.array(W_1)
-            W_try[i,j] += h
-            c2 = compute_loss(X, Y, W_try, b_params, lambda_value)
+                W_try = np.array(W_params)
+                W_try[i][j,k] += h
+                c2 = compute_loss(X, Y, W_try, b_params, lambda_value)
 
-            grad_W[i,j] = (c2-c1) / (2*h)
+                grad_W_params[i][j, k] = (c2-c1) / (2*h)
 
-    return grad_W, grad_b
+    return grad_W_params, grad_b_params
 
 def ComputeGradsNum(X, Y, P, W_1, b_1, W_2, b_2, lambda_value, h):
     """ Converted from matlab code by Andree Hultgren """
@@ -344,6 +345,10 @@ def ComputeGradsNum(X, Y, P, W_1, b_1, W_2, b_2, lambda_value, h):
 
 def grad_checking(dw, dw_num, db, db_num):
     global exp_derivative
+    dw = dw[0]
+    dw_num = dw_num[0]
+    db = db[0]
+    db_num = db_num[0]
     check_dW = ( np.abs(dw[0, 0] - dw_num[0, 0]) ) / ( max(exp_derivative, np.abs(dw[0, 0]) + np.abs(dw_num[0, 0])) )
     check_db = ( np.abs(db[0, 0] - db_num[0, 0]) ) / ( max(exp_derivative, np.abs(db[0, 0]) + np.abs(db_num[0, 0])) )
     print('Check dW: ', check_dW)
@@ -528,7 +533,7 @@ def assemble_datasets():
     batch_file_training = data_path + 'data_batch_1'
     batch_file_validation = data_path + 'data_batch_2'
     batch_file_test = data_path + 'test_batch'
-    num_data = 10000
+    num_data = 100
 
     # Reading training set
     X_train, Y_train, y_train = read_imgs(batch_file_training)
@@ -652,22 +657,21 @@ def model_gradient_checking():
     #
     X_i_list, S_i_list, P = forward_pass(X_train, W_params, b_params)
     
-    # dW_1, db_1, dW_2, db_2 = backward_pass(X_train, Y_train, H, P, \
-    #     W_1, b_1, W_2, b_2, GD_params['lambda'])
+    dW, db = backward_pass(X_train, Y_train, P, X_i_list, S_i_list, \
+        W_params, b_params, GD_params['lambda'])
     
-    # dW1_center_diff, db1_center_diff, dW2_center_diff, db2_center_diff = ComputeGradsNumSlow(X_train, \
-    #     Y_train, P, W_1, b_1, W_2, b_2, GD_params['lambda'], exp_derivative)
+    dW_center_diff, db_center_diff = ComputeGradsNumSlow(X_train, \
+        Y_train, P, W_params, b_params, GD_params['lambda'], exp_derivative)
     
     # dW1_finite, db1_finite, dW2_finite, db2_finite = ComputeGradsNum(X_train, \
     #     Y_train, P, W_1, b_1, W_2, b_2, GD_params['lambda'], exp_derivative)
 
-    # print('Analytical vs Centered Difference W1, B1:', grad_checking(dW_1, dW1_center_diff, db_1, db1_center_diff))
-    # print('Analytical vs Centered Difference W2, B2:', grad_checking(dW_2, dW2_center_diff, db_2, db2_center_diff))
+    print('Analytical vs Centered Difference W1, B1:', grad_checking(dW, dW_center_diff, db, db_center_diff))
     
     # print('Analytical vs Finite Difference W1, B1:', grad_checking(dW_1, dW1_finite, db_1, db1_finite))
     # print('Analytical vs Finite Difference W2, B2:', grad_checking(dW_2, dW2_finite, db_2, db2_finite))
     
-    print('Scores:\n', 'Shape: ', H.shape)
+    # print('Scores:\n', 'Shape: ', H.shape)
     print('Predictions:\n', 'Shape: ', P.shape)
     
     ########## End of Gradient Checking ##########
